@@ -1,0 +1,35 @@
+============================================================
+ War in the North - Mods by Imyala
+ Licensed under MIT. Copyright (c) 2026 Imyala.
+ Keep this header intact in forks and redistributions.
+============================================================
+
+Made by Imyala.  MIT licence - the full text is in LICENSE.
+
+Fork it, improve it, ship it in your mod pack - just keep my name in the
+credits and link back to the original guide. If you release a modified
+version, say what you changed so people know which parts are yours and which
+are mine.
+
+
+THE GUIDES
+----------
+Widescreen Mod
+    https://steamcommunity.com/sharedfiles/filedetails/?id=3786147705
+
+Text Chat Mod
+    https://steamcommunity.com/sharedfiles/filedetails/?id=3787342265
+
+Save Keys and Co-op Hero Sync do not have guides yet, so their files carry no
+Guide line rather than a dead one.
+
+
+CHANGING A LINK OR A VERSION
+---------------------------
+Every file's header is written by witn_stamp.py. Edit the MODINFO table at the
+top of it - title, version and guide URL per mod - and run:
+
+    python witn_stamp.py
+
+It replaces the header it wrote last time instead of stacking another one, so
+it is safe to run as often as you like.

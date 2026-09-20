@@ -1,4 +1,50 @@
 @echo off
+rem ============================================================
+rem  War in the North - Widescreen Mod
+rem  Author:  Imyala
+rem  Version: 1.8.1
+rem  Guide:   https://steamcommunity.com/sharedfiles/filedetails/?id=3786147705
+rem  Licensed under MIT. Copyright (c) 2026 Imyala.
+rem  Keep this header intact in forks and redistributions.
+rem ============================================================
+rem ============================================================
+rem  War in the North - Widescreen Mod
+rem  Author:  Imyala
+rem  Version: 1.8
+rem  Guide:   https://steamcommunity.com/sharedfiles/filedetails/?id=3786147705
+rem  Licensed under MIT. Copyright (c) 2026 Imyala.
+rem  Keep this header intact in forks and redistributions.
+rem ============================================================
+rem ============================================================
+rem  War in the North - Widescreen Mod
+rem  Author:  Imyala
+rem  Version: 1.7.2
+rem  Guide:   https://steamcommunity.com/sharedfiles/filedetails/?id=3786147705
+rem  Licensed under MIT. Copyright (c) 2026 Imyala.
+rem  Keep this header intact in forks and redistributions.
+rem ============================================================
+rem ============================================================
+rem  War in the North - Mod Tools
+rem  Author:  Imyala
+rem  Version: 1.2
+rem  Licensed under MIT. Copyright (c) 2026 Imyala.
+rem  Keep this header intact in forks and redistributions.
+rem ============================================================
+rem ============================================================
+rem  War in the North - Mod Tools
+rem  Author:  Imyala
+rem  Version: 1.1
+rem  Licensed under MIT. Copyright (c) 2026 Imyala.
+rem  Keep this header intact in forks and redistributions.
+rem ============================================================
+rem ============================================================
+rem  War in the North - Widescreen Mod
+rem  Author:  Imyala
+rem  Version: 1.6
+rem  Guide:   https://steamcommunity.com/sharedfiles/filedetails/?id=3786147705
+rem  Licensed under MIT. Copyright (c) 2026 Imyala.
+rem  Keep this header intact in forks and redistributions.
+rem ============================================================
 cd /d "%~dp0"
 title War in the North - Ultrawide + HUD
 
@@ -15,6 +61,8 @@ if not defined PY goto nopython
 
 echo.
 echo   Your monitor resolution, for example 3440x1440 or 5120x1440.
+echo   One build covers 2560x1080, 3440x1440, 3840x1600 and 5120x1440, so this
+echo   only picks which family goes in the primary slot.
 set /p RES=  Resolution [3440x1440]: 
 if "%RES%"=="" set RES=3440x1440
 
@@ -30,7 +78,8 @@ if errorlevel 1 goto failed
 
 echo.
 echo   Done.  Fully quit the game before launching it, then pick %RES%
-echo   in the video options.  F5 is now a quicksave.
+echo   in the video options.  F5 quicksaves out in the levels, F6 in the
+echo   hub towns (Bree, Rivendell, Nordinbad, Sarn Ford).
 echo.
 echo   To undo:  witn_patch.py --revert  and  witn_hud_shift.py --revert
 echo.
