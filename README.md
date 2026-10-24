@@ -52,13 +52,5 @@ Copy every file from this package into your game folder, the one that contains w
 ...\steamapps\common\LORWIN
 Double-click install.bat
 
-Uninstall
-Keep both .original files of anything they touch and restore from it. Steam's "Verify integrity of game files" also puts everything back.
-Notes Edit
-Important Notes
-Quit before relaunching. Fully quit the game before relaunching - it caches settings on exit.
-Safe to re-run. Both scripts always rebuild from the .original backup, so re-running them is safe and repeatable, and options can be changed as many times as you like without uninstalling first.
-Steam updates. If a Steam update replaces witn.exe, you may have to uninstall the mod, then rerun the mod file again.
-
 
 This is a patcher, not a modified game. It edits your own installed copy in place, which is why no game file is included here.
