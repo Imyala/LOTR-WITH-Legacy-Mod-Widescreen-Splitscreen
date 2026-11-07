@@ -1,7 +1,7 @@
 ============================================================
  War in the North - Widescreen Mod
  Author:  Imyala
- Version: 1.8.1
+ Version: 1.9
  Guide:   https://steamcommunity.com/sharedfiles/filedetails/?id=3786147705
  Licensed under MIT. Copyright (c) 2026 Imyala.
  Keep this header intact in forks and redistributions.
@@ -302,12 +302,31 @@ Every page gets a .original beside it and --revert puts them all back.
 
 AFTER A GAME UPDATE
 -------------------
-Steam replaces witn.exe when the game updates (Patch 1 landed on 15 Sep 2026),
-so the exe half of this mod is gone until you run install.bat again.  Nothing
-else is needed: every address the patcher writes is found by byte signature in
-whatever executable is there, and it refuses rather than guesses if a pattern
-is missing or not unique.  The GUI layout files it edits are not part of the
-update, so witn_hud_shift.py finds them as it left them.
+Steam replaces witn.exe when the game updates (Patch 1 landed on 15 Sep 2026,
+Patch 2 on 3 Nov 2026), so the exe half of this mod is gone until you run
+install.bat again.  Nothing else is needed: every address the patcher writes
+is found by byte signature in whatever executable is there, and it refuses
+rather than guesses if a pattern is missing or not unique.
+
+PATCH 2 (v1.000.004) needs mod version 1.9 or later.  That build stopped
+importing GetKeyState, the Windows call the save keys and the FOV zoom keys
+poll - older installers stop with "GetKeyState is not imported by this
+executable".  1.9 looks the function up at run time instead (through
+GetModuleHandleA / GetProcAddress, which every build imports), so the keys work
+exactly as before; on the older builds the output is byte-for-byte what 1.8.1
+produced.  Nothing about the ultrawide canvas, the FOV or the split-screen
+branches moved: all nine patch sites are instruction-for-instruction identical
+across the launch build, Patch 1 and Patch 2.
+
+Patch 2 also rewrote some of the data files this mod edits (the resolution
+string table gui_tables.s2.sdf, the engine's name table, the front-end layout).
+Up to 1.8.1 witn_hud_shift.py rebuilt every file from its .original backup -
+which after an update is a copy of the OLD game's file.  1.9 stamps each file
+with the game build it was written against; when Steam has replaced a file
+since the last run, the stale backup is parked as .original.build-<build> and
+the new stock file becomes the baseline.  Files the update did not touch are
+rebuilt from their existing backups as before, and --revert never puts an old
+build's file back over a new one.
 
 The patcher notices the new build on its own.  witn.exe.original from before
 the update is a copy of the OLD game, so it is kept aside as
@@ -447,8 +466,9 @@ NOTES
 * witn_hud_shift.py refuses to run at 16:9 or narrower, where there is no
   edge to restore and it would only shrink your HUD for nothing.  --force
   overrides that if it is what you actually want.
-* If a Steam update replaces witn.exe, run  python witn_patch.py --rebase
-  once to adopt the new build as the baseline, then patch normally.
+* If a Steam update replaces witn.exe (or any layout file), just run
+  install.bat again - both scripts notice the new build on their own, park the
+  old backups and take fresh ones.  --rebase is only for other mods.
 * If you install another mod that replaces witn.exe, use --rebase the same
   way, and do not re-run witn_hud_shift.py until you have checked whether
   that mod also replaced hud_hd.s2.sdf.
@@ -456,6 +476,39 @@ NOTES
 
 CHANGES
 -------
+1.9  Works on Patch 2 (v1.000.004, 3 Nov 2026).
+
+     * The new executable no longer imports GetKeyState, so every earlier
+       installer stopped at "GetKeyState is not imported by this executable"
+       and nothing was patched - which is why the resolution list, the HUD
+       and the split-screen fill all looked "broken" after the update.  The
+       per-frame stub now resolves GetKeyState itself on its first frame
+       (GetModuleHandleA("USER32.dll") + GetProcAddress, both imported by
+       every build) and keeps the pointer in .wsave; F5/F6 and the Numpad
+       zoom keys behave exactly as before.  Builds that still import it are
+       patched exactly as 1.8.1 did (verified byte-identical on Patch 1).
+
+     * Every other patch site - resolution filter, both canvas sites, the
+       text clip, the frame hook, RequestSave, the projection builder and
+       tanf, the local-player table and GetNumLocalPlayers - was re-verified
+       on the Patch 2 build; all are found by signature exactly once.
+
+     * Local split screen: nothing in the engine changed (MaxLocalPlayers
+       still defaults to 2, IsSplitscreen / GetNumLocalPlayers and the
+       Player2PressStart flow are all still there).  Two pads, second pad
+       presses Start at the hero lobby, as in HOW-TO-LOCAL-COOP.txt.  The
+       split-aware canvas and split FOV are back once the exe is patched.
+
+     * witn_hud_shift.py is game-update aware: every file it edits gets a
+       build-stamped .wpatch, and a file Steam has replaced since the last run
+       is adopted as the new stock baseline (old backup parked as
+       .original.build-<build>) instead of being rebuilt from the stale
+       backup.  Patch 2 rewrote gui_tables.s2.sdf, and 1.8.1 would have put
+       the old game's string table back over it.  --revert leaves such files
+       alone rather than downgrading them.
+
+     * install.bat: one header instead of six stacked ones.
+
 1.8.1  Loading screens fill the ultrawide screen (uniform scale, cropped top
      and bottom; --loading stretch / off).  The per-level pages under
      res\worlds are the ones that draw; the four under res\gui\load never were.

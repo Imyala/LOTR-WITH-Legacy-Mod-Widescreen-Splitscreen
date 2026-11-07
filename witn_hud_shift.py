@@ -2,7 +2,7 @@
 # ============================================================
 #  War in the North - Widescreen Mod
 #  Author:  Imyala
-#  Version: 1.8.1
+#  Version: 1.9
 #  Guide:   https://steamcommunity.com/sharedfiles/filedetails/?id=3786147705
 #  Licensed under MIT. Copyright (c) 2026 Imyala.
 #  Keep this header intact in forks and redistributions.
@@ -20,7 +20,12 @@ back out by that same amount, so they sit exactly as far from the screen edge
 as they did at 16:9 - without stretching anything.
 
 It edits res/gui/hud/_bin/pc64/hud_hd.s2.sdf in place (a backup .original is
-made first).  The file is a property tree: 16-byte records of
+made first).  Every file it touches gets a .original backup and a .wpatch
+stamp (sha of what was written + the game build it was written against), and
+every run rebuilds from the backup.  When Steam has replaced a file since the
+last run - a game update - the backup belongs to the OLD game and is parked
+as .original.build-<old build> while the new stock file becomes the baseline;
+it is never rebuilt from a stale backup (1.9).  The file is a property tree: 16-byte records of
 (childCount, nameCRC, type, slot) with values in a flat 4-byte slot pool, and
 names resolved through res/engine/_bin/pc64/stringcrctable.est.  Only the
 Position (vec3) of the whitelisted top-level elements is touched - two floats
@@ -408,21 +413,17 @@ def _is_key_run(d, p):
     return n >= 6 and p + n < len(d) and d[p + n] == 0
 
 
-def blank_widescreen_label(root, revert=False):
+def blank_widescreen_label(root, build, revert=False, rebase=False):
     """Empty every language's ' (Widescreen)' suffix in gui_tables.s2.sdf."""
     done = 0
     for rel in GUI_TABLES:
         f = os.path.join(root, rel)
         if not os.path.isfile(f):
             continue
-        bak = f + '.original'
         if revert:
-            if os.path.isfile(bak):
-                _write_atomic(f, _read_whole(bak, 'the backup'), 'restoring')
-                print(f"restored {f}")
+            restore(f, build, 'the backup')
             continue
-        if not os.path.exists(bak):
-            _write_atomic(bak, _read_whole(f, 'the string table'), 'saving the backup')
+        bak = baseline(f, build, 'the string table', rebase)
         d = bytearray(_read_whole(bak, 'the string table'))
         key = d.find(b'\0widescreen\0')
         if key < 0:
@@ -444,6 +445,7 @@ def blank_widescreen_label(root, revert=False):
             n += 1
             p = (e + 2 + 3) & ~3
         _write_atomic(f, bytes(d), 'writing the string table')
+        _stamp_write(f, build)
         done += 1
         print(f"  labels     : {os.path.basename(rel)}: blanked the '(Widescreen)' suffix in "
               f"{n} languages - the mode list shows the bare resolution")
@@ -458,36 +460,154 @@ def _sha(path):
     return h.hexdigest()
 
 
-def guard_foreign(target, bak, stamp):
-    """Refuse to rebuild from a stale backup if another mod replaced the file.
+def _game_build(root):
+    """A fingerprint of the GAME build the data files belong to: witn.exe's PE
+    link stamp plus the depot's changelist number (the `changelist` file Steam
+    puts beside the exe).  It is written into every stamp so a later run can
+    tell a Steam update (the fingerprint moved) from another mod's edit (it did
+    not)."""
+    parts = []
+    exe = os.path.join(root, 'witn.exe')
+    try:
+        with open(exe, 'rb') as f:
+            hdr = f.read(0x200)
+        pe = struct.unpack_from('<I', hdr, 0x3C)[0]
+        parts.append(str(struct.unpack_from('<I', hdr, pe + 8)[0]))
+    except (OSError, struct.error):
+        pass
+    try:
+        cl = open(os.path.join(root, 'changelist')).read().strip()
+        if cl.isdigit():
+            parts.append(cl)
+    except OSError:
+        pass
+    return '-'.join(parts) or 'unknown'
 
-    Every run rebuilds from the .original, which silently undoes any other mod
-    that has edited the same file since.  Compare what is on disk against what
-    we last wrote and stop if they disagree.
-    """
+
+def _stamp_read(stamp):
+    """(sha, build) from a stamp; build is '' for a pre-1.9 stamp."""
+    try:
+        parts = open(stamp).read().split()
+    except OSError:
+        return ('', '')
+    return (parts[0] if parts else '', parts[1] if len(parts) > 1 else '')
+
+
+def _stamp_write(path, build):
+    open(path + '.wpatch', 'w').write(_sha(path) + ' ' + build + '\n')
+
+
+def _classify(path, build):
+    """How the live file relates to our backup and stamp:
+         'fresh'    no backup yet
+         'stock'    identical to the backup (untouched, or reverted)
+         'ours'     exactly what this tool wrote last time
+         'updated'  changed by a GAME UPDATE since the last run
+         'foreign'  changed by something else (another mod)"""
+    bak, stamp = path + '.original', path + '.wpatch'
     if not os.path.isfile(bak):
-        return                              # first run: nothing to protect
-    current = _sha(target)
-    if current == _sha(bak):
-        return                              # untouched, or freshly reverted
-    if not os.path.isfile(stamp):
-        return                              # predates stamping - cannot tell
-    if current == open(stamp).read().strip():
-        return                              # exactly what we wrote last time
-    raise SystemExit(
-        f"{target}\nhas been changed by something other than this script - another "
-        f"mod has\nedited it since the last run.\n"
-        f"\n"
-        f"Rebuilding from {os.path.basename(bak)} would silently undo that mod, so this\n"
-        f"is a refusal rather than a guess.  Pick one:\n"
-        f"\n"
-        f"  keep the other mod and put this layout on top of it:\n"
-        f"      python witn_hud_shift.py --rebase <your usual options>\n"
-        f"  the .original then holds the other mod, and --revert goes back to it.\n"
-        f"\n"
-        f"  or drop the other mod and start clean:\n"
-        f"      python witn_hud_shift.py --revert\n"
-        f"  then run this again.")
+        return 'fresh'
+    cur = _sha(path)
+    if cur == _sha(bak):
+        return 'stock'
+    ssha, sbuild = _stamp_read(stamp)
+    if cur == ssha:
+        return 'ours'
+    if sbuild:
+        # a 1.9 stamp names the game build it was written against: if the
+        # game has moved on since, Steam rewrote this file.  If it has not,
+        # the game did not touch it - something else did.
+        return 'updated' if sbuild != build else 'foreign'
+    # No stamp, or a pre-1.9 one with no build in it (an install made before
+    # 1.9, then a game update).  Steam writes every file of an update in one
+    # pass, so a file rewritten AFTER our backup/stamp and within a few hours
+    # of the depot's own bookkeeping files is the update; anything else is
+    # not.  The reference is `changelist` / `installscript.vdf`, which Steam
+    # rewrites on every build and no mod touches - NOT witn.exe, which
+    # install.bat has just re-patched by the time this script runs.
+    try:
+        ref_m = max(os.path.getmtime(os.path.join(_ROOT, f))
+                    for f in ('changelist', 'installscript.vdf')
+                    if os.path.isfile(os.path.join(_ROOT, f)))
+    except (OSError, ValueError):
+        return 'foreign'
+    try:
+        live_m, bak_m = os.path.getmtime(path), os.path.getmtime(bak)
+        ours_m = os.path.getmtime(stamp) if os.path.isfile(stamp) else bak_m
+        if live_m > max(bak_m, ours_m) and abs(live_m - ref_m) < 6 * 3600:
+            return 'updated'
+    except OSError:
+        pass
+    return 'foreign'
+
+
+_ROOT = '.'          # the game folder (--root); _classify reads Steam's files there
+
+
+def baseline(path, build, what, rebase=False):
+    """Make sure path.original is the pristine copy to rebuild from, and return
+    it.  Handles every case: first run (take the backup), a game update (park
+    the stale backup, adopt the new stock file), --rebase (adopt whatever is
+    there), and another mod's edit (refuse, rather than silently undo it)."""
+    bak, stamp = path + '.original', path + '.wpatch'
+    if rebase:
+        _write_atomic(bak, _read_whole(path, what), 'saving the new baseline')
+        if os.path.isfile(stamp):
+            os.remove(stamp)
+        print(f"rebased: {bak} now holds the current (modded) file")
+        return bak
+    state = _classify(path, build)
+    if state == 'fresh':
+        _write_atomic(bak, _read_whole(path, what), 'saving the backup')
+        print(f"backup written: {bak}")
+    elif state == 'updated':
+        _, sbuild = _stamp_read(stamp)
+        keep = bak + '.build-' + (sbuild or 'older')
+        if os.path.exists(keep):
+            os.remove(bak)
+        else:
+            os.replace(bak, keep)
+        _write_atomic(bak, _read_whole(path, what), 'saving the new baseline')
+        if os.path.isfile(stamp):
+            os.remove(stamp)
+        print(f"GAME UPDATE: Steam replaced {os.path.basename(path)} since the last run.\n"
+              f"  The old backup is kept as {os.path.basename(keep)}; the new stock file\n"
+              f"  is the baseline from now on.")
+    elif state == 'foreign':
+        raise SystemExit(
+            f"{path}\nhas been changed by something other than this script - another "
+            f"mod has\nedited it since the last run.\n"
+            f"\n"
+            f"Rebuilding from {os.path.basename(bak)} would silently undo that mod, so this\n"
+            f"is a refusal rather than a guess.  Pick one:\n"
+            f"\n"
+            f"  keep the other mod and put this layout on top of it:\n"
+            f"      python witn_hud_shift.py --rebase <your usual options>\n"
+            f"  the .original then holds the other mod, and --revert goes back to it.\n"
+            f"\n"
+            f"  or drop the other mod and start clean:\n"
+            f"      python witn_hud_shift.py --revert\n"
+            f"  then run this again.")
+    return bak
+
+
+def restore(path, build, what):
+    """--revert for one file: put the backup back, unless a game update has
+    replaced the file since (restoring would downgrade it to the old game)."""
+    bak, stamp = path + '.original', path + '.wpatch'
+    if not os.path.isfile(bak):
+        return False
+    if _classify(path, build) == 'updated':
+        print(f"left alone: {path}\n  Steam has replaced it since the last run - it is already "
+              f"the new game's stock file,\n  and the backup here is from the OLD game.")
+        if os.path.isfile(stamp):
+            os.remove(stamp)
+        return False
+    _write_atomic(path, _read_whole(bak, what), 'restoring')
+    if os.path.isfile(stamp):
+        os.remove(stamp)
+    print(f"restored {path}")
+    return True
 
 
 def main():
@@ -574,33 +694,24 @@ def main():
                          'clips the string inside its own box)')
     a = ap.parse_args()
 
+    global _ROOT
+    _ROOT = a.root
     hud = os.path.join(a.root, HUD)
     bak = hud + '.original'
     stamp = hud + '.wpatch'
     if not os.path.isfile(hud):
         raise SystemExit(f"{hud} not found - run from the game folder")
+    build = _game_build(a.root)
 
     if a.revert:
         if not os.path.isfile(bak):
             raise SystemExit(f"{bak} missing - use Steam's Verify integrity instead")
-        _write_atomic(hud, _read_whole(bak, 'the backup'), 'restoring')
-        if os.path.isfile(stamp):
-            os.remove(stamp)
-        print(f"restored {hud}")
+        restore(hud, build, 'the backup')
         for rel in [FE] + LOAD + SPLIT_HUDS:
-            f = os.path.join(a.root, rel)
-            if os.path.isfile(f + '.original'):
-                _write_atomic(f, _read_whole(f + '.original', 'the backup'),
-                              'restoring')
-                print(f"restored {f}")
-        blank_widescreen_label(a.root, revert=True)
+            restore(os.path.join(a.root, rel), build, 'the backup')
+        blank_widescreen_label(a.root, build, revert=True)
         for rel in _load_pages(a.root):
-            f = os.path.join(a.root, rel)
-            if os.path.isfile(f + '.original'):
-                _write_atomic(f, _read_whole(f + '.original', 'the backup'), 'restoring')
-                if os.path.isfile(f + '.wpatch'):
-                    os.remove(f + '.wpatch')
-                print(f"restored {f}")
+            restore(os.path.join(a.root, rel), build, 'the backup')
         return
 
     w, h = (int(x) for x in a.res.lower().split('x'))
@@ -635,17 +746,7 @@ def main():
               f"layout units ({shift * w / (720*max(aspect,16/9)):.0f}px)")
 
     tab = load_crc(os.path.join(a.root, CRC))
-    if a.rebase:
-        _write_atomic(bak, _read_whole(hud, 'the hud file'),
-                      'saving the new baseline')
-        if os.path.isfile(stamp):
-            os.remove(stamp)
-        print(f"rebased: {bak} now holds the current (modded) file")
-    else:
-        guard_foreign(hud, bak, stamp)
-    if not os.path.exists(bak):
-        _write_atomic(bak, _read_whole(hud, 'the hud file'), 'saving the backup')
-        print(f"backup written: {bak}")
+    bak = baseline(hud, build, 'the hud file', a.rebase)
     d = Sdf(bak, tab)          # always start from the pristine copy
 
     if a.list:
@@ -791,28 +892,36 @@ def main():
         print(f"  un-stretched {n} top-level Scale records on X (children skipped - "
               f"scale already propagates to them from their parent)")
     _write_atomic(hud, bytes(d.h), 'writing the hud file')
-    open(stamp, 'w').write(_sha(hud) + '\n')
+    _stamp_write(hud, build)
 
     # Split-screen layouts are never edited (see the SPLIT SCREEN note above).
-    # If a 1.6.0 run shifted them, quietly put them back to their baseline.
+    # If a 1.6.0 run shifted them, quietly put them back to their baseline -
+    # unless a game update has replaced them, in which case the new stock file
+    # IS the baseline.
     for rel in SPLIT_HUDS:
         f = os.path.join(a.root, rel)
-        bak = f + '.original'
-        if os.path.isfile(f) and os.path.isfile(bak) and _sha(f) != _sha(bak):
-            _write_atomic(f, _read_whole(bak, 'the split baseline'),
-                          'restoring ' + os.path.basename(rel))
-            open(f + '.wpatch', 'w').write(_sha(f) + '\n')
-            print(f"  {os.path.basename(rel)}: restored to stock (split viewports "
-                  f"are 16:9 or narrower - no edge restore applies)")
+        if not os.path.isfile(f):
+            continue
+        state = _classify(f, build)
+        if state in ('fresh', 'stock'):
+            continue
+        if state == 'updated':
+            baseline(f, build, 'the split layout')          # park + adopt
+            continue
+        _write_atomic(f, _read_whole(f + '.original', 'the split baseline'),
+                      'restoring ' + os.path.basename(rel))
+        _stamp_write(f, build)
+        print(f"  {os.path.basename(rel)}: restored to stock (split viewports "
+              f"are 16:9 or narrower - no edge restore applies)")
 
     if not a.keep_labels:
-        blank_widescreen_label(a.root)
+        blank_widescreen_label(a.root, build, rebase=a.rebase)
     if a.loading != 'off' and shift > 0.0:
-        fill_loadscreens(a, tab, 720.0 * max(aspect, 16 / 9) / 1280.0, a.loading)
+        fill_loadscreens(a, tab, 720.0 * max(aspect, 16 / 9) / 1280.0, a.loading, build)
     if a.frontend:
-        shift_frontend(a, tab, shift)
+        shift_frontend(a, tab, shift, build)
     elif xcomp != 1.0 and not a.no_frontend_scale:
-        unstretch_frontend(a, tab, xcomp)
+        unstretch_frontend(a, tab, xcomp, build)
     print("done - fully quit the game before relaunching")
 
 
@@ -874,7 +983,7 @@ def _load_pages(root):
     return out
 
 
-def fill_loadscreens(a, tab, k, mode):
+def fill_loadscreens(a, tab, k, mode, build):
     """Make the loading screens span the whole canvas.
 
     Each level carries its own page (res\\worlds\\<level>\\_bin\\pc64\\load_NN.s2.sdf:
@@ -898,9 +1007,7 @@ def fill_loadscreens(a, tab, k, mode):
     cx, cy = 640.0, 360.0
     for rel in _load_pages(a.root):
         p = os.path.join(a.root, rel)
-        bak = p + '.original'
-        if not os.path.exists(bak):
-            _write_atomic(bak, _read_whole(p, 'a loading page'), 'saving the backup')
+        bak = baseline(p, build, 'a loading page', a.rebase)
         d = Sdf(bak, tab)
         n = 0
         cur = None
@@ -926,46 +1033,43 @@ def fill_loadscreens(a, tab, k, mode):
                 sx, sy, sz = struct.unpack_from('<3f', d.h, off)
                 struct.pack_into('<3f', d.h, off, sx * k, sy * (k if mode == 'fill' else 1.0), sz)
         _write_atomic(p, bytes(d.h), 'writing a loading page')
-        open(p + '.wpatch', 'w').write(_sha(p) + '\n')
+        _stamp_write(p, build)
         total += n
         files += 1
     print(f"  loading    : {files} loading pages {'scaled uniformly x%.4f, art cropped top/bottom' % k if mode == 'fill' else 'stretched x%.4f on X' % k}"
           f" ({total} positions moved); tip line, spinner and logo untouched")
 
 
-def unstretch_frontend(a, tab, xcomp):
+def unstretch_frontend(a, tab, xcomp, build):
     """The same horizontal un-stretch over the menu layout.
 
     Positions are deliberately not touched here - that is what made the button
     column disappear last time.  Only Scale.X changes, so nothing can move out
     of the page and nothing can be dropped."""
     fe = os.path.join(a.root, FE)
-    bak = fe + '.original'
     if not os.path.isfile(fe):
         print(f"  frontend   : {FE} not found, skipped")
         return
-    if not os.path.exists(bak):
-        _write_atomic(bak, _read_whole(fe, 'a layout file'), 'saving the backup')
+    bak = baseline(fe, build, 'a layout file', a.rebase)
     d = Sdf(bak, tab)
     n = unstretch(d, xcomp)
     _write_atomic(fe, bytes(d.h), 'writing a layout file')
+    _stamp_write(fe, build)
     print(f"  frontend   : un-stretched {n} menu elements on X "
           f"({os.path.basename(FE)}, positions untouched)")
 
 
-def shift_frontend(a, tab, shift):
+def shift_frontend(a, tab, shift, build):
     """Push the front-end menu furniture back out to the screen edges.
 
     Same idea as the HUD, and deliberately much more conservative: only named
     elements that were checked against the shipped coordinates are moved, and
     nothing that labels or picks a 3D character is touched."""
     fe = os.path.join(a.root, FE)
-    bak = fe + '.original'
     if not os.path.isfile(fe):
         print(f"  frontend   : {FE} not found, skipped")
         return
-    if not os.path.exists(bak):
-        _write_atomic(bak, _read_whole(fe, 'a layout file'), 'saving the backup')
+    bak = baseline(fe, build, 'a layout file', a.rebase)
     d = Sdf(bak, tab)
     moved = 0
     for name, props in d.nodes():
@@ -982,6 +1086,7 @@ def shift_frontend(a, tab, shift):
                 if x in FE_BUTTON_X:
                     d.setx(ps, x - shift); moved += 1
     _write_atomic(fe, bytes(d.h), 'writing a layout file')
+    _stamp_write(fe, build)
     print(f"  frontend   : edge-restored {moved} menu positions in {os.path.basename(FE)} "
           f"(character symbols, name plates and hero mouse regions left alone)")
 

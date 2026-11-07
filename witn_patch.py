@@ -2,7 +2,7 @@
 # ============================================================
 #  War in the North - Widescreen Mod
 #  Author:  Imyala
-#  Version: 1.8.1
+#  Version: 1.9
 #  Guide:   https://steamcommunity.com/sharedfiles/filedetails/?id=3786147705
 #  Licensed under MIT. Copyright (c) 2026 Imyala.
 #  Keep this header intact in forks and redistributions.
@@ -54,8 +54,8 @@ Five edits to witn.exe.  See README-ultrawide.txt for the full write-up.
   5. QUICKSAVE KEY - the game only saves at scripted checkpoints.  A small
      code section is appended to the executable and App::Frame's once-per-
      frame call to PumpMessages() is routed through it.  The stub calls the
-     original, polls a key with GetKeyState (already imported), and on the
-     frame the key goes down calls the engine's own CheckpointMgr::RequestSave -
+     original, polls a key with GetKeyState, and on the frame the key goes
+     down calls the engine's own CheckpointMgr::RequestSave -
      the exact call the netcode makes on a checkpoint.  It sets a pending-save
      flag and a short countdown on the manager; the game's own per-frame update
      then writes the save through DoCheckpointSave (the routine behind every
@@ -67,6 +67,15 @@ Five edits to witn.exe.  See README-ultrawide.txt for the full write-up.
      unless a local player entity is live, so it does nothing in the menus, and
      the saves are timestamped, so a stray press can never overwrite an existing
      save.
+
+     GetKeyState was an import of the launch and Patch 1 builds and the stub
+     called it straight through the import table.  Patch 2 (v1.000.004, 3 Nov
+     2026) dropped that import, so 1.9 resolves it itself: on the first frame
+     the stub asks GetModuleHandleA("USER32.dll") / GetProcAddress for it (both
+     are imported by every build so far), keeps the pointer in .wsave and calls
+     through that from then on.  If a build ever stops importing those two as
+     well, the patcher refuses rather than guesses.  Builds that still import
+     GetKeyState are patched exactly as before.
 
      (History: up to 1.5.2 the key called SaveCheckpoint(0), which only
      re-captures the respawn point in memory and writes no file.  A 1.6 interim
@@ -811,10 +820,21 @@ def patch_appendix(data, find, vk=0x74, vk_client=0x75, fov=True, fov_scale=1.0,
             raise SystemExit("RequestSave() does not look as expected - the "
                              "save path has changed; this build is not supported")
 
+    # GetKeyState: called through the import table when the build imports it
+    # (launch, Patch 1); otherwise (Patch 2 onwards) resolved at run time
+    # through GetModuleHandleA + GetProcAddress into a slot in .wsave.
+    gks_dynamic = False
+    gmh = gpa = None
     if save_stub or fov_keys:
         gks = p.import_vma(b'GetKeyState')
         if gks is None:
-            raise SystemExit("GetKeyState is not imported by this executable")
+            gmh = p.import_vma(b'GetModuleHandleA')
+            gpa = p.import_vma(b'GetProcAddress')
+            if gmh is None or gpa is None:
+                raise SystemExit("GetKeyState is not imported by this executable, "
+                                 "and neither are GetModuleHandleA/GetProcAddress "
+                                 "to look it up with - unsupported build")
+            gks_dynamic = True
 
     # ---- resolve the FOV target ---------------------------------------------
     tanf = None
@@ -868,14 +888,51 @@ def patch_appendix(data, find, vk=0x74, vk_client=0x75, fov=True, fov_scale=1.0,
     cnt_reads = []
     frame_hook = save_stub or need_split or fov_keys
     fovkey_fix = []          # (blob offset of an 8-byte SSE op, constant name)
+    gks_calls = []           # blob offsets of 'call [rip+slot]' (6 bytes, disp +2)
+    gks_fix = []             # (blob offset, kind) of the resolver's rip refs
+    gks_skip = []            # blob offsets of 'jz rel32' that skip the key polls
+    gks_slot = gks_str_u32 = gks_str_name = None
+
+    def call_gks():
+        """call GetKeyState - through the IAT, or through our .wsave slot."""
+        if gks_dynamic:
+            gks_calls.append(len(m.b))
+            m(b'\xFF\x15\x00\x00\x00\x00')              # call [rip+slot]
+        else:
+            m.rel(b'\xFF\x15', gks)                       # call [GetKeyState]
+
     if frame_hook:
         f0 = len(m.b)
         m(b'\x48\x83\xEC\x28')                       # sub  rsp,0x28
         m.rel(b'\xE8', pump)                          # call PumpMessages
         m(b'\x89\x44\x24\x20')                       # mov  [rsp+0x20],eax
+    if gks_dynamic and (save_stub or fov_keys):
+        # ---- resolve GetKeyState once (Patch 2+ no longer imports it) -------
+        # slot == 0 until the first frame; then GetModuleHandleA("USER32.dll")
+        # and GetProcAddress fill it.  USER32 is always loaded (the game's own
+        # window lives there), so the lookup cannot fail in practice; if it
+        # ever did, every key poll is skipped and the frame carries on.
+        gks_fix.append((len(m.b), 'slot'))
+        m(b'\x48\x8B\x05\x00\x00\x00\x00')          # mov  rax,[rip+slot]
+        m(b'\x48\x85\xC0')                           # test rax,rax
+        jh = len(m.b); m(b'\x75\x00')                 # jnz  have
+        gks_fix.append((len(m.b), 'u32'))
+        m(b'\x48\x8D\x0D\x00\x00\x00\x00')          # lea  rcx,[rip+"USER32.dll"]
+        m.rel(b'\xFF\x15', gmh)                       # call [GetModuleHandleA]
+        m(b'\x48\x85\xC0')                           # test rax,rax
+        gks_skip.append(len(m.b)); m(b'\x0F\x84\x00\x00\x00\x00')   # jz keys_done
+        m(b'\x48\x8B\xC8')                           # mov  rcx,rax
+        gks_fix.append((len(m.b), 'name'))
+        m(b'\x48\x8D\x15\x00\x00\x00\x00')          # lea  rdx,[rip+"GetKeyState"]
+        m.rel(b'\xFF\x15', gpa)                       # call [GetProcAddress]
+        gks_fix.append((len(m.b), 'slot'))
+        m(b'\x48\x89\x05\x00\x00\x00\x00')          # mov  [rip+slot],rax
+        m(b'\x48\x85\xC0')                           # test rax,rax
+        gks_skip.append(len(m.b)); m(b'\x0F\x84\x00\x00\x00\x00')   # jz keys_done
+        m.b[jh + 1] = len(m.b) - (jh + 2)              # have:
     if save_stub:
         m(b'\xB9' + struct.pack('<I', vk))            # mov  ecx,VK
-        m.rel(b'\xFF\x15', gks)                       # call [GetKeyState]
+        call_gks()                                     # call GetKeyState
         m(b'\x31\xD2')                               # xor  edx,edx
         m(b'\xF6\xC4\x80')                           # test ah,0x80        key down?
         m(b'\x74\x02')                               # je   +2
@@ -904,7 +961,7 @@ def patch_appendix(data, find, vk=0x74, vk_client=0x75, fov=True, fov_scale=1.0,
             # second key: hand the engine the same request a host sends a client,
             # which is the only save path a joined client actually has
             m(b'\xB9' + struct.pack('<I', vk_client))     # mov  ecx,VK
-            m.rel(b'\xFF\x15', gks)                       # call [GetKeyState]
+            call_gks()                                     # call GetKeyState
             m(b'\x31\xD2')                               # xor  edx,edx
             m(b'\xF6\xC4\x80')                          # test ah,0x80
             m(b'\x74\x02')                               # je   +2
@@ -937,7 +994,7 @@ def patch_appendix(data, find, vk=0x74, vk_client=0x75, fov=True, fov_scale=1.0,
         for zvk, op, lim in ((0x6D, b'\xF3\x0F\x58\x05', 'fov_max'),   # addss / minss
                             (0x6B, b'\xF3\x0F\x5C\x05', 'fov_min')):   # subss / maxss
             m(b'\xB9' + struct.pack('<I', zvk))           # mov  ecx,VK
-            m.rel(b'\xFF\x15', gks)                       # call [GetKeyState]
+            call_gks()                                     # call GetKeyState
             m(b'\xF6\xC4\x80')                           # test ah,0x80
             jk = len(m.b); m(b'\x74\x00')                 # je   next
             fovkey_fix.append((len(m.b), 'fov_scl')); m(b'\xF3\x0F\x10\x05\x00\x00\x00\x00')  # movss xmm0,[scale]
@@ -946,13 +1003,15 @@ def patch_appendix(data, find, vk=0x74, vk_client=0x75, fov=True, fov_scale=1.0,
             fovkey_fix.append((len(m.b), 'fov_scl')); m(b'\xF3\x0F\x11\x05\x00\x00\x00\x00')  # movss [scale],xmm0
             m.b[jk + 1] = len(m.b) - (jk + 2)
         m(b'\xB9' + struct.pack('<I', 0x6A))              # mov  ecx,VK_MULTIPLY
-        m.rel(b'\xFF\x15', gks)                           # call [GetKeyState]
+        call_gks()                                         # call GetKeyState
         m(b'\xF6\xC4\x80')                               # test ah,0x80
         jk = len(m.b); m(b'\x74\x00')                     # je   next
         fovkey_fix.append((len(m.b), 'fov_dflt')); m(b'\xF3\x0F\x10\x05\x00\x00\x00\x00')   # movss xmm0,[default]
         fovkey_fix.append((len(m.b), 'fov_scl')); m(b'\xF3\x0F\x11\x05\x00\x00\x00\x00')    # movss [scale],xmm0
         m.b[jk + 1] = len(m.b) - (jk + 2)
 
+    for j in gks_skip:                                 # keys_done:
+        struct.pack_into('<i', m.b, j + 2, len(m.b) - (j + 6))
     if need_split:
         # refresh the cached local-player count once per frame, on the game
         # thread, exactly the way IsSplitscreen does - a no-op until the
@@ -1120,6 +1179,17 @@ def patch_appendix(data, find, vk=0x74, vk_client=0x75, fov=True, fov_scale=1.0,
         # mov [rip+count],eax (disp +2, len 6)
         struct.pack_into('<i', blob, cnt_guard + 3, splittab - (vma + cnt_guard + 7))
         struct.pack_into('<i', blob, cnt_store + 2, ctgt - (vma + cnt_store + 6))
+    if gks_dynamic and (save_stub or fov_keys):
+        while len(blob) % 8:
+            blob.append(0)
+        gks_slot = new_va + len(blob); blob += struct.pack('<Q', 0)   # GetKeyState*
+        gks_str_u32 = new_va + len(blob); blob += b'USER32.dll\0'
+        gks_str_name = new_va + len(blob); blob += b'GetKeyState\0'
+        for off in gks_calls:          # call [rip+d]: 6 bytes, disp at +2
+            struct.pack_into('<i', blob, off + 2, (p.base + gks_slot) - (vma + off + 6))
+        for off, kind in gks_fix:      # mov/lea r64,[rip+d]: 7 bytes, disp at +3
+            tgt = {'slot': gks_slot, 'u32': gks_str_u32, 'name': gks_str_name}[kind]
+            struct.pack_into('<i', blob, off + 3, (p.base + tgt) - (vma + off + 7))
     state_rva = state2_rva = None
     if save_stub:
         state_rva = new_va + len(blob)
@@ -1199,6 +1269,9 @@ def patch_appendix(data, find, vk=0x74, vk_client=0x75, fov=True, fov_scale=1.0,
         print(f"  text clip  : SetClipRect call @ 0x{clip_call_off:X} -> shim "
               f"0x{vma + clip_stub:X} (page rect 0/1280 -> -4096/8192 on X only; "
               f"real routine 0x{clip_target:X})")
+    if gks_dynamic and (save_stub or fov_keys):
+        print(f"  key input  : this build does not import GetKeyState - resolved at "
+              f"run time via GetModuleHandleA/GetProcAddress into 0x{p.base + gks_slot:X}")
     if save_stub:
         print(f"  save key   : hook @ 0x{call_off:X} -> section {nm} @ 0x{new_rp:X} "
               f"(VK 0x{vk:02X}); RequestSave=0x{reqsave:X} mgr=0x{cpmgr:X} "
@@ -1270,7 +1343,8 @@ def _build_id(path):
 
 def _build_name(bid):
     return {(1784922545, 0x9e46af): 'launch build (linked 2026-07-24)',
-            (1787159334, 0x9e5c1f): 'Patch 1 / v1.000.003 (linked 2026-08-19)'
+            (1787159334, 0x9e5c1f): 'Patch 1 / v1.000.003 (linked 2026-08-19)',
+            (1791447717, 0x9e80bf): 'Patch 2 / v1.000.004 (linked 2026-10-08)',
             }.get(bid, f'unknown build {bid}')
 
 
